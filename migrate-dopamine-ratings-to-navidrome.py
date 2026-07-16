@@ -234,22 +234,18 @@ def apply_navidrome_updates(client: NavidromeClient, d_track: TrackData, n_track
             stats.already_rated += 1
             print(f"     -> [ID: {track_id}] Already rated ({nd_rating} stars) in Navidrome.")
 
-
-# --- MAIN INTERACTIVE LOOP ---
-
 def main():
     stats = SyncStats()
     tracks = extract_and_merge_dopamine_tracks(DOPAMINE_DB_PATHS, stats)
-    
+
     print(f"\nSuccessfully collected {len(tracks)} unique tracks requiring sync.\n")
-    
+
     if not tracks:
         print("No tracks found to sync. Exiting.")
         return
 
     client = NavidromeClient(NAVIDROME_URL, NAVIDROME_USER, NAVIDROME_PASS)
-    
-# --- REVISED MAIN LOOP SECTION ---
+
     try:
         for d_track in tracks:
             candidates = client.search_tracks(d_track.artists, d_track.title)
@@ -268,29 +264,38 @@ def main():
             # We're trying to avoid unnecessary prompts for single matches, but still want to handle updates if needed
             if len(candidates) == 1:
                 best = candidates[0]
-                
-                # Check for differences
-                is_loved_diff = (d_track.love and not best.get('starred'))
-                is_rating_diff = (d_track.rating_10 > 0 and best.get('userRating', 0) == 0)
-                
-                # Only perform update if necessary, else skip silently
-                if is_loved_diff or is_rating_diff:
-                    apply_navidrome_updates(client, d_track, best, stats)
-                    stats.matched += 1
-                continue # Skip the interactive prompt since we handled the single match
- 
+
+                equivalent_rating = (d_track.rating_10 + 1) // 2
+                current_rating = best.get("userRating")
+                needs_rating = (
+                    d_track.rating_10 > 0 and
+                    current_rating is None
+                ) or (
+                    d_track.rating_10 > 0 and
+                    current_rating is not None and
+                    equivalent_rating != current_rating
+                )
+                needs_love = (
+                    d_track.love and
+                    best.get("starred") is None
+                )
+
+                # There's 1 match and it doesn't need any updates, so we can skip the interactive prompt
+                if not needs_love and not needs_rating:
+                    continue
+
             # Convert Dopamine's Love boolean to Yes/No to normalize UI
             d_love_str = "Yes" if d_track.love else "No"
 
             # Manual selection logic for candidates > 1
-            print("\n" + "=" * 115)
+            print("\n" + "=" * 135)
             print("▶ DOPAMINE SOURCE TRACK")
-            print("-" * 115)
+            print("-" * 135)
             print(f"{'':<10} | {'Artist':<22} | {'Title':<25} | {'Album':<44} | {'Dur(s)':<6} | {'Love':<4} | {'Rating'}")
             print(f"{'':<10} | {d_track.artists[:22]:<22} | {d_track.title[:25]:<25} | {d_track.album[:44]:<44} | {normalize_duration(d_track.duration):<6} | {d_love_str:<4} | {d_track.rating_10}/10")
 
             print("\n▶ NAVIDROME CANDIDATES")
-            print("-" * 115)
+            print("-" * 135)
             print(f"{'Idx':<3} | {'Conf':<4} | {'Artist':<22} | {'Title':<25} | {'Album':<44} | {'Dur(s)':<6} | {'Love':<4} | {'Rating'}")
             
             for i, c in enumerate(candidates):
@@ -306,14 +311,18 @@ def main():
                 
                 idx_str = f"{i + 1}"
                 print(f"{idx_str:<3} | {conf:.2f} | {c_artist:<22} | {c_title:<25} | {c_album:<44} | {c_dur:<6} | {c_love:<4} | {c_rating}")
-                resp = input("\nSelect match index(es) separated by commas, or 'N' to skip: ").strip().lower()
+            resp = input("\nSelect match index(es) separated by commas, or 'N' to skip: ").strip().lower()
             while True:                
                 if resp == 'n':
                     print("⏭ Skipped.")
                     break
                     
                 try:
-                    indices = [int(x.strip()) for x in resp.split(',')]
+                    indices = [
+                        int(x.strip()) - 1
+                        for x in resp.split(",")
+                    ]
+                    # indices = [int(x.strip()) for x in resp.split(',')]
                     
                     if all(0 <= idx < len(candidates) for idx in indices):
                         print("Applying updates...")
