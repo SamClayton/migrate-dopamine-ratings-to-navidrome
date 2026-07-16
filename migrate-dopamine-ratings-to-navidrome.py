@@ -14,6 +14,7 @@ DOPAMINE_DB_PATHS = [
     Path(r"/home/sam/.config/dopamine/Dopamine.db"),
     Path(r"/home/sam/.config/Dopamine/Dopamine.db")
 ]
+MERGE_DB_PATH = Path("merge.db")
 
 NAVIDROME_URL = "http://localhost:4533" 
 NAVIDROME_USER = "Samantha"
@@ -140,7 +141,24 @@ def calculate_confidence(d_track: TrackData, n_track: Dict[str, Any]) -> float:
 
     return (score_artist * 0.35) + (score_title * 0.40) + (score_album * 0.15) + (score_dur * 0.10)
 
-def extract_and_merge_dopamine_tracks(db_paths: List[Path], stats: SyncStats) -> List[TrackData]:
+def init_merge_db():
+    with sqlite3.connect(MERGE_DB_PATH) as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS cached_tracks (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                artists TEXT,
+                title TEXT,
+                album TEXT,
+                duration REAL,
+                love INTEGER,
+                rating_10 INTEGER,
+                status TEXT DEFAULT 'PENDING',
+                UNIQUE(artists, title, album)
+            )
+        """)
+
+def cache_and_merge_dopamine_tracks(db_paths: List[Path], stats: SyncStats):
+    init_merge_db()
     merged: Dict[tuple, TrackData] = {}
     
     for db_path in db_paths:
@@ -168,7 +186,6 @@ def extract_and_merge_dopamine_tracks(db_paths: List[Path], stats: SyncStats) ->
                 for row in cursor.fetchall():
                     # 1. Strip surrounding semicolons and spaces from Artists
                     clean_artists = (row["Artists"] or "").strip("; ")
-                    
                     key = (
                         clean_artists.lower(),
                         (row["TrackTitle"] or "").strip().lower(),
@@ -194,19 +211,38 @@ def extract_and_merge_dopamine_tracks(db_paths: List[Path], stats: SyncStats) ->
         except sqlite3.Error as e:
             print(f"Failed to read {db_path}: {e}")
             
-    # Calculate merged metrics
-    unique_tracks = list(merged.values())
-    for t in unique_tracks:
-        if t.love: stats.loved_tracks += 1
-        if t.rating_10 > 0: stats.rated_tracks += 1
-        
-    return unique_tracks
+    with sqlite3.connect(MERGE_DB_PATH) as conn:
+        for t in merged.values():
+            conn.execute("""
+                INSERT INTO cached_tracks (artists, title, album, duration, love, rating_10)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(artists, title, album) DO UPDATE SET
+                    love = MAX(love, excluded.love),
+                    rating_10 = MAX(rating_10, excluded.rating_10)
+            """, (t.artists, t.title, t.album, t.duration, 1 if t.love else 0, t.rating_10))
 
-def apply_navidrome_updates(client: NavidromeClient, d_track: TrackData, n_track: Dict[str, Any], stats: SyncStats):
+def load_pending_tracks(stats: SyncStats) -> List[Dict[str, Any]]:
+    with sqlite3.connect(MERGE_DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT love, rating_10 FROM cached_tracks")
+        for row in cursor.fetchall():
+            if row["love"]: stats.loved_tracks += 1
+            if row["rating_10"] > 0: stats.rated_tracks += 1
+            
+        cursor.execute("SELECT id, artists, title, album, duration, love, rating_10 FROM cached_tracks WHERE status = 'PENDING'")
+        return [dict(row) for row in cursor.fetchall()]
+
+def update_track_status(track_id: int, status: str):
+    with sqlite3.connect(MERGE_DB_PATH) as conn:
+        conn.execute("UPDATE cached_tracks SET status = ? WHERE id = ?", (status, track_id))
+
+def apply_navidrome_updates(client: NavidromeClient, d_track: Dict[str, Any], n_track: Dict[str, Any], stats: SyncStats):
     track_id = n_track["id"]
     is_starred = n_track.get("starred") is not None
     
-    if d_track.love:
+    if d_track["love"]:
         if not is_starred:
             try:
                 client.set_love(track_id)
@@ -219,14 +255,14 @@ def apply_navidrome_updates(client: NavidromeClient, d_track: TrackData, n_track
             stats.already_starred += 1
             print(f"     -> [ID: {track_id}] Already starred in Navidrome.")
             
-    if d_track.rating_10 > 0:
+    if d_track["rating_10"] > 0:
         nd_rating = n_track.get("userRating")
         if not nd_rating:
-            rating_5 = math.ceil(d_track.rating_10 / 2)
+            rating_5 = math.ceil(d_track["rating_10"] / 2)
             try:
                 client.set_rating(track_id, rating_5)
                 stats.ratings_updated += 1
-                print(f"     -> [ID: {track_id}] Rated {rating_5} stars (converted from {d_track.rating_10}/10)")
+                print(f"     -> [ID: {track_id}] Rated {rating_5} stars (converted from {d_track['rating_10']}/10)")
             except Exception as e:
                 stats.errors += 1
                 print(f"     -> [ID: {track_id}] Failed to rate: {e}")
@@ -234,29 +270,39 @@ def apply_navidrome_updates(client: NavidromeClient, d_track: TrackData, n_track
             stats.already_rated += 1
             print(f"     -> [ID: {track_id}] Already rated ({nd_rating} stars) in Navidrome.")
 
+
+
 def main():
     stats = SyncStats()
-    tracks = extract_and_merge_dopamine_tracks(DOPAMINE_DB_PATHS, stats)
-
-    print(f"\nSuccessfully collected {len(tracks)} unique tracks requiring sync.\n")
-
+    cache_and_merge_dopamine_tracks(DOPAMINE_DB_PATHS, stats)
+    tracks = load_pending_tracks(stats)
+    
+    print(f"\nSuccessfully collected {len(tracks)} unique pending tracks requiring sync.\n")
+    
     if not tracks:
-        print("No tracks found to sync. Exiting.")
+        print("No pending tracks found to sync. Exiting.")
         return
 
     client = NavidromeClient(NAVIDROME_URL, NAVIDROME_USER, NAVIDROME_PASS)
-
+    
     try:
         for d_track in tracks:
-            candidates = client.search_tracks(d_track.artists, d_track.title)
+            # Reconstruct TrackData structure for similarity analytics
+            d_track_obj = TrackData(
+                artists=d_track["artists"], title=d_track["title"], album=d_track["album"],
+                duration=d_track["duration"], love=bool(d_track["love"]), rating_10=d_track["rating_10"]
+            )
+            
+            candidates = client.search_tracks(d_track["artists"], d_track["title"])
             
             if not candidates:
                 stats.not_found += 1
-                print(f"Skipping: '{d_track.title}' by {d_track.artists} (Not found in Navidrome)")
+                print(f"Skipping: '{d_track['title']}' by {d_track['artists']} (Not found in Navidrome)")
+                update_track_status(d_track["id"], "SKIPPED")
                 continue
                 
             for c in candidates:
-                c['_confidence'] = calculate_confidence(d_track, c)
+                c['_confidence'] = calculate_confidence(d_track_obj, c)
                 
             candidates.sort(key=lambda x: x['_confidence'], reverse=True)
 
@@ -264,36 +310,23 @@ def main():
             # We're trying to avoid unnecessary prompts for single matches, but still want to handle updates if needed
             if len(candidates) == 1:
                 best = candidates[0]
+                is_loved_diff = (d_track["love"] and not best.get('starred'))
+                is_rating_diff = (d_track["rating_10"] > 0 and best.get('userRating', 0) == 0)
+                
+                if is_loved_diff or is_rating_diff:
+                    apply_navidrome_updates(client, d_track, best, stats)
+                    stats.matched += 1
+                update_track_status(d_track["id"], "PROCESSED")
+                continue 
+            
+            d_love_str = "Yes" if d_track["love"] else "No"
 
-                equivalent_rating = (d_track.rating_10 + 1) // 2
-                current_rating = best.get("userRating")
-                needs_rating = (
-                    d_track.rating_10 > 0 and
-                    current_rating is None
-                ) or (
-                    d_track.rating_10 > 0 and
-                    current_rating is not None and
-                    equivalent_rating != current_rating
-                )
-                needs_love = (
-                    d_track.love and
-                    best.get("starred") is None
-                )
-
-                # There's 1 match and it doesn't need any updates, so we can skip the interactive prompt
-                if not needs_love and not needs_rating:
-                    continue
-
-            # Convert Dopamine's Love boolean to Yes/No to normalize UI
-            d_love_str = "Yes" if d_track.love else "No"
-
-            # Manual selection logic for candidates > 1
-            print("\n" + "=" * 135)
+            print("\n" + "=" * 115)
             print("▶ DOPAMINE SOURCE TRACK")
             print("-" * 135)
-            print(f"{'':<10} | {'Artist':<22} | {'Title':<25} | {'Album':<44} | {'Dur(s)':<6} | {'Love':<4} | {'Rating'}")
-            print(f"{'':<10} | {d_track.artists[:22]:<22} | {d_track.title[:25]:<25} | {d_track.album[:44]:<44} | {normalize_duration(d_track.duration):<6} | {d_love_str:<4} | {d_track.rating_10}/10")
-
+            print(f"{'':<10} | {'Artist':<22} | {'Title':<25} | {'Album':<44} | {'Dur(s)':<6} |{'Love':<4} | {'Rating'}")
+            print(f"{'':<10} | {d_track['artists'][:22]:<22} | {d_track['title'][:25]:<25} | {d_track['album'][:44]:<44} | {normalize_duration(d_track['duration']):<6} | {d_love_str:<4} | {d_track['rating_10']}/10")
+            
             print("\n▶ NAVIDROME CANDIDATES")
             print("-" * 135)
             print(f"{'Idx':<3} | {'Conf':<4} | {'Artist':<22} | {'Title':<25} | {'Album':<44} | {'Dur(s)':<6} | {'Love':<4} | {'Rating'}")
@@ -311,30 +344,33 @@ def main():
                 
                 idx_str = f"{i + 1}"
                 print(f"{idx_str:<3} | {conf:.2f} | {c_artist:<22} | {c_title:<25} | {c_album:<44} | {c_dur:<6} | {c_love:<4} | {c_rating}")
-            resp = input("\nSelect match index(es) separated by commas, or 'N' to skip: ").strip().lower()
+
+            skipped = False
             while True:                
+                resp = input("\nSelect match index(es) separated by commas, or 'n' to skip: ").strip().lower()
                 if resp == 'n':
                     print("⏭ Skipped.")
+                    update_track_status(d_track["id"], "SKIPPED")
+                    skipped = True
                     break
-                    
+
                 try:
-                    indices = [
-                        int(x.strip()) - 1
-                        for x in resp.split(",")
-                    ]
-                    # indices = [int(x.strip()) for x in resp.split(',')]
-                    
+                    indices = [int(x.strip()) - 1 for x in resp.split(',')]
+
                     if all(0 <= idx < len(candidates) for idx in indices):
                         print("Applying updates...")
                         stats.matched += 1
                         for idx in indices:
                             apply_navidrome_updates(client, d_track, candidates[idx], stats)
+                        update_track_status(d_track["id"], "PROCESSED")
                         break
                     else:
                         print("Error: One or more indices are out of range. Try again.")
                 except ValueError:
                     print("Error: Invalid input format. Please enter integers separated by commas, or 'N'.")
-                    
+            if skipped:
+                continue
+
     except KeyboardInterrupt:
         print("\n\nSync interrupted by user. Generating partial statistics...")
     finally:
