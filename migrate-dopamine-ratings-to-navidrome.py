@@ -249,6 +249,7 @@ def main():
 
     client = NavidromeClient(NAVIDROME_URL, NAVIDROME_USER, NAVIDROME_PASS)
     
+# --- REVISED MAIN LOOP SECTION ---
     try:
         for d_track in tracks:
             candidates = client.search_tracks(d_track.artists, d_track.title)
@@ -263,20 +264,39 @@ def main():
                 
             candidates.sort(key=lambda x: x['_confidence'], reverse=True)
 
-            # Widened formatting slightly to accommodate the two new columns
+            # Only bypass if there is exactly 1 match
+            # We're trying to avoid unnecessary prompts for single matches, but still want to handle updates if needed
+            if len(candidates) == 1:
+                best = candidates[0]
+                
+                # Check for differences
+                is_loved_diff = (d_track.love and not best.get('starred'))
+                is_rating_diff = (d_track.rating_10 > 0 and best.get('userRating', 0) == 0)
+                
+                # Only perform update if necessary, else skip silently
+                if is_loved_diff or is_rating_diff:
+                    apply_navidrome_updates(client, d_track, best, stats)
+                    stats.matched += 1
+                continue # Skip the interactive prompt since we handled the single match
+ 
+            # Convert Dopamine's Love boolean to Yes/No to normalize UI
+            d_love_str = "Yes" if d_track.love else "No"
+
+            # Manual selection logic for candidates > 1
             print("\n" + "=" * 115)
             print("▶ DOPAMINE SOURCE TRACK")
             print("-" * 115)
-            print(f"{'Artist':<22} | {'Title':<25} | {'Album':<22} | {'Dur(s)':<6} | {'Love':<4} | {'Rating'}")
-            print(f"{d_track.artists[:22]:<22} | {d_track.title[:25]:<25} | {d_track.album[:22]:<22} | {normalize_duration(d_track.duration):<6} | {d_track.love!s:<4} | {d_track.rating_10}/10")
-            
+            print(f"{'':<10} | {'Artist':<22} | {'Title':<25} | {'Album':<44} | {'Dur(s)':<6} | {'Love':<4} | {'Rating'}")
+            print(f"{'':<10} | {d_track.artists[:22]:<22} | {d_track.title[:25]:<25} | {d_track.album[:44]:<44} | {normalize_duration(d_track.duration):<6} | {d_love_str:<4} | {d_track.rating_10}/10")
+
             print("\n▶ NAVIDROME CANDIDATES")
             print("-" * 115)
-            print(f"{'Idx':<3} | {'Conf':<4} | {'Artist':<22} | {'Title':<25} | {'Album':<22} | {'Dur(s)':<6} | {'Love':<4} | {'Rating'}")
+            print(f"{'Idx':<3} | {'Conf':<4} | {'Artist':<22} | {'Title':<25} | {'Album':<44} | {'Dur(s)':<6} | {'Love':<4} | {'Rating'}")
+            
             for i, c in enumerate(candidates):
                 c_artist = c.get('artist', '')[:22]
                 c_title = c.get('title', '')[:25]
-                c_album = c.get('album', '')[:22]
+                c_album = c.get('album', '')[:44]
                 c_dur = c.get('duration', 0)
                 conf = c.get('_confidence', 0.0)
                 
@@ -284,11 +304,10 @@ def main():
                 c_love = "Yes" if c.get('starred') else "No"
                 c_rating = c.get('userRating', 'None')
                 
-                idx_str = f"[{i}]"
-                print(f"{idx_str:<3} | {conf:.2f} | {c_artist:<22} | {c_title:<25} | {c_album:<22} | {c_dur:<6} | {c_love:<4} | {c_rating}")
-            while True:
+                idx_str = f"{i + 1}"
+                print(f"{idx_str:<3} | {conf:.2f} | {c_artist:<22} | {c_title:<25} | {c_album:<44} | {c_dur:<6} | {c_love:<4} | {c_rating}")
                 resp = input("\nSelect match index(es) separated by commas, or 'N' to skip: ").strip().lower()
-                
+            while True:                
                 if resp == 'n':
                     print("⏭ Skipped.")
                     break
