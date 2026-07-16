@@ -241,19 +241,20 @@ def update_track_status(track_id: int, status: str):
 def apply_navidrome_updates(client: NavidromeClient, d_track: Dict[str, Any], n_track: Dict[str, Any], stats: SyncStats):
     track_id = n_track["id"]
     is_starred = n_track.get("starred") is not None
+    track_display = f"\"{n_track.get('artist', 'Unknown')} - {n_track.get('title', 'Unknown')}\""
     
     if d_track["love"]:
         if not is_starred:
             try:
                 client.set_love(track_id)
                 stats.loved_updated += 1
-                print(f"     -> [ID: {track_id}] Loved successfully!")
+                print(f"     -> [ID: {track_id}] {track_display} Loved successfully!")
             except Exception as e:
                 stats.errors += 1
-                print(f"     -> [ID: {track_id}] Failed to love: {e}")
+                print(f"     -> [ID: {track_id}] {track_display} Failed to love: {e}")
         else:
             stats.already_starred += 1
-            print(f"     -> [ID: {track_id}] Already starred in Navidrome.")
+            print(f"     -> [ID: {track_id}] {track_display} Already starred in Navidrome.")
             
     if d_track["rating_10"] > 0:
         nd_rating = n_track.get("userRating")
@@ -262,15 +263,13 @@ def apply_navidrome_updates(client: NavidromeClient, d_track: Dict[str, Any], n_
             try:
                 client.set_rating(track_id, rating_5)
                 stats.ratings_updated += 1
-                print(f"     -> [ID: {track_id}] Rated {rating_5} stars (converted from {d_track['rating_10']}/10)")
+                print(f"     -> [ID: {track_id}] {track_display} Rated {rating_5} stars (converted from {d_track['rating_10']}/10)")
             except Exception as e:
                 stats.errors += 1
-                print(f"     -> [ID: {track_id}] Failed to rate: {e}")
+                print(f"     -> [ID: {track_id}] {track_display} Failed to rate: {e}")
         else:
             stats.already_rated += 1
-            print(f"     -> [ID: {track_id}] Already rated ({nd_rating} stars) in Navidrome.")
-
-
+            print(f"     -> [ID: {track_id}] {track_display} Already rated ({nd_rating} stars) in Navidrome.")
 
 def main():
     stats = SyncStats()
@@ -294,82 +293,83 @@ def main():
             )
             
             candidates = client.search_tracks(d_track["artists"], d_track["title"])
-            
+
             if not candidates:
-                stats.not_found += 1
                 print(f"Skipping: '{d_track['title']}' by {d_track['artists']} (Not found in Navidrome)")
                 update_track_status(d_track["id"], "SKIPPED")
+                stats.not_found += 1
                 continue
-                
+
             for c in candidates:
                 c['_confidence'] = calculate_confidence(d_track_obj, c)
                 
             candidates.sort(key=lambda x: x['_confidence'], reverse=True)
 
-            # Only bypass if there is exactly 1 match
-            # We're trying to avoid unnecessary prompts for single matches, but still want to handle updates if needed
+            # Silently skip if there is exactly 1 candidate and it already matches perfectly
             if len(candidates) == 1:
                 best = candidates[0]
-                is_loved_diff = (d_track["love"] and not best.get('starred'))
-                is_rating_diff = (d_track["rating_10"] > 0 and best.get('userRating', 0) == 0)
+                # Check if there are any differences that actually require updates
+                is_loved_diff = d_track["love"] and (best.get("starred") is None)
+                is_rating_diff = d_track["rating_10"] > 0 and (best.get("userRating") is None)
                 
-                if is_loved_diff or is_rating_diff:
-                    apply_navidrome_updates(client, d_track, best, stats)
-                    stats.matched += 1
-                update_track_status(d_track["id"], "PROCESSED")
-                continue 
-            
-            d_love_str = "Yes" if d_track["love"] else "No"
+                if not is_loved_diff and not is_rating_diff:
+                    # Silently mark as processed since no changes are needed
+                    update_track_status(d_track["id"], "PROCESSED")
+                    continue
 
-            print("\n" + "=" * 115)
-            print("▶ DOPAMINE SOURCE TRACK")
-            print("-" * 135)
-            print(f"{'':<10} | {'Artist':<22} | {'Title':<25} | {'Album':<44} | {'Dur(s)':<6} |{'Love':<4} | {'Rating'}")
-            print(f"{'':<10} | {d_track['artists'][:22]:<22} | {d_track['title'][:25]:<25} | {d_track['album'][:44]:<44} | {normalize_duration(d_track['duration']):<6} | {d_love_str:<4} | {d_track['rating_10']}/10")
-            
-            print("\n▶ NAVIDROME CANDIDATES")
-            print("-" * 135)
-            print(f"{'Idx':<3} | {'Conf':<4} | {'Artist':<22} | {'Title':<25} | {'Album':<44} | {'Dur(s)':<6} | {'Love':<4} | {'Rating'}")
-            
-            for i, c in enumerate(candidates):
-                c_artist = c.get('artist', '')[:22]
-                c_title = c.get('title', '')[:25]
-                c_album = c.get('album', '')[:44]
-                c_dur = c.get('duration', 0)
-                conf = c.get('_confidence', 0.0)
+            # Interactive loop for multiple candidates OR single candidates requiring actual updates
+            if len(candidates) >= 1:
+                # Print Dopamine Track Header
+                print("\n▶ DOPAMINE SOURCE TRACK")
+                print("-" * 135)
+                d_love_str = "Yes" if d_track["love"] else "No"
+                d_rating_str = f"{d_track['rating_10']}/10" if d_track["rating_10"] > 0 else "None"
+                print(f"{'':<10} | {'Artist':<22} | {'Title':<25} | {'Album':<44} | {'Dur ':<4} | {'Love':<4} | {'Rating'}")
+                print(f"           | {d_track['artists']:<22.22} | {d_track['title']:<25.25} | {d_track['album']:<44.44} | {normalize_duration(d_track['duration']):<4} | {d_love_str:<4.4} | {d_rating_str}")
                 
-                # 2. Extract and format candidate Love/Rating metrics
-                c_love = "Yes" if c.get('starred') else "No"
-                c_rating = c.get('userRating', 'None')
+                # Print Candidates Table
+                print("\n▶ NAVIDROME CANDIDATES")
+                print("-" * 135)
+                print("Idx | Conf | Artist                 | Title                     | Album                                        | Dur  | Love | Rating")
+                for i, c_track in enumerate(candidates):
+                    c_conf = c_track.get('_confidence', 0.0)
+                    c_artist = c_track.get('artist', 'Unknown')
+                    c_title = c_track.get('title', 'Unknown')
+                    c_album = c_track.get('album', 'Unknown')
+                    c_dur = c_track.get('duration', 0)
+                    c_love = "Yes" if c_track.get('starred') is not None else "No"
+                    c_rating = c_track.get('userRating', "None")
+                    idx_str = f"{i + 1}"
+                    print(f"{idx_str:<3} | {c_conf:.2f} | {c_artist:<22.22} | {c_title:<25.25} | {c_album:<44.44} | {c_dur:<4} | {c_love:<4} | {c_rating}")
                 
-                idx_str = f"{i + 1}"
-                print(f"{idx_str:<3} | {conf:.2f} | {c_artist:<22} | {c_title:<25} | {c_album:<44} | {c_dur:<6} | {c_love:<4} | {c_rating}")
-
-            skipped = False
-            while True:                
-                resp = input("\nSelect match index(es) separated by commas, or 'n' to skip: ").strip().lower()
-                if resp == 'n':
-                    print("⏭ Skipped.")
-                    update_track_status(d_track["id"], "SKIPPED")
-                    skipped = True
-                    break
-
-                try:
-                    indices = [int(x.strip()) - 1 for x in resp.split(',')]
-
-                    if all(0 <= idx < len(candidates) for idx in indices):
-                        print("Applying updates...")
-                        stats.matched += 1
-                        for idx in indices:
-                            apply_navidrome_updates(client, d_track, candidates[idx], stats)
-                        update_track_status(d_track["id"], "PROCESSED")
+                skipped = False
+                while True:                
+                    resp = input("\nSelect match index(es) separated by commas, or 'n' to skip: ").strip().lower()
+                    if resp == 'n':
+                        print("⏭ Skipped.")
+                        update_track_status(d_track["id"], "SKIPPED")
+                        skipped = True
                         break
-                    else:
-                        print("Error: One or more indices are out of range. Try again.")
-                except ValueError:
-                    print("Error: Invalid input format. Please enter integers separated by commas, or 'N'.")
-            if skipped:
-                continue
+                        
+                    try:
+                        indices = [int(x.strip()) - 1 for x in resp.split(',')]
+                        
+                        if all(0 <= idx < len(candidates) for idx in indices):
+                            print("Applying updates...")
+                            stats.matched += 1
+                            for idx in indices:
+                                # Apply updates to selected candidate(s)
+                                target_cand = candidates[idx]
+                                apply_navidrome_updates(client, d_track, target_cand, stats)
+                            update_track_status(d_track["id"], "PROCESSED")
+                            break
+                        else:
+                            print("Error: One or more indices are out of range. Try again.")
+                    except ValueError:
+                        print("Error: Invalid input format. Please enter integers separated by commas, or 'N'.")
+                
+                if skipped:
+                    continue
 
     except KeyboardInterrupt:
         print("\n\nSync interrupted by user. Generating partial statistics...")
