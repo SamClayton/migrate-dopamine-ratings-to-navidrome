@@ -18,7 +18,7 @@ MERGE_DB_PATH = Path("merge.db")
 
 NAVIDROME_URL = "http://localhost:4533" 
 NAVIDROME_USER = "Samantha"
-NAVIDROME_PASS = "Y*9$ApQMUW!RibHrmyQ$x"
+NAVIDROME_PASS = ""
 # ---------------------
 
 @dataclass
@@ -254,7 +254,7 @@ def apply_navidrome_updates(client: NavidromeClient, d_track: Dict[str, Any], n_
                 print(f"     -> [ID: {track_id}] {track_display} Failed to love: {e}")
         else:
             stats.already_starred += 1
-            print(f"     -> [ID: {track_id}] {track_display} Already starred in Navidrome.")
+            print(f"     -> [ID: {track_id}] {track_display} Already loved in Navidrome.")
             
     if d_track["rating_10"] > 0:
         nd_rating = n_track.get("userRating")
