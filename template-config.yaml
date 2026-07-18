@@ -1,0 +1,6 @@
+dopamine_db_paths: []
+merge_db_path: merge.db
+navidrome:
+  url: "http://localhost:4533"
+  user: ""
+  password: ""

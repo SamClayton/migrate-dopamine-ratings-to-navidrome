@@ -4,22 +4,43 @@ import random
 import string
 import requests
 import math
+import yaml
 from pathlib import Path
 from dataclasses import dataclass
 from typing import List, Dict, Any, Optional
 from difflib import SequenceMatcher
 
-# --- CONFIGURATION ---
-DOPAMINE_DB_PATHS = [
-    Path(r"/home/sam/.config/dopamine/Dopamine.db"),
-    Path(r"/home/sam/.config/Dopamine/Dopamine.db")
-]
-MERGE_DB_PATH = Path("merge.db")
 
-NAVIDROME_URL = "http://localhost:4533" 
-NAVIDROME_USER = "Samantha"
-NAVIDROME_PASS = ""
-# ---------------------
+def load_config() -> Dict[str, Any]:
+    config_path = Path(__file__).with_name("config.yaml")
+    template_path = Path(__file__).with_name("template-config.yaml")
+
+    if not config_path.exists():
+        print(
+            f"Configuration file not found: {config_path}\n"
+            f"Create a copy of {template_path.name} as {config_path.name} and fill in your values."
+        )
+        raise SystemExit(1)
+
+    with config_path.open("r", encoding="utf-8") as fh:
+        loaded = yaml.safe_load(fh) or {}
+
+    if not isinstance(loaded, dict):
+        raise ValueError(f"Expected a YAML mapping in {config_path}")
+
+    return {
+        "dopamine_db_paths": loaded.get("dopamine_db_paths") or [],
+        "merge_db_path": loaded.get("merge_db_path"),
+        "navidrome": loaded.get("navidrome") or {},
+    }
+
+
+CONFIG = load_config()
+DOPAMINE_DB_PATHS = [Path(path) for path in CONFIG["dopamine_db_paths"]]
+MERGE_DB_PATH = Path(CONFIG["merge_db_path"])
+NAVIDROME_URL = CONFIG["navidrome"]["url"]
+NAVIDROME_USER = CONFIG["navidrome"]["user"]
+NAVIDROME_PASS = CONFIG["navidrome"]["password"]
 
 @dataclass
 class TrackData:
